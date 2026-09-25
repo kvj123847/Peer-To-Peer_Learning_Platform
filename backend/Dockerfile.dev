@@ -1,0 +1,27 @@
+# ─────────────────────────────────────────────────────────────
+# Development Dockerfile — hot reload via ts-node-dev
+# Used by docker-compose.yml for the backend service.
+# ─────────────────────────────────────────────────────────────
+FROM node:20-alpine
+
+RUN apk add --no-cache libc6-compat python3 make g++
+
+WORKDIR /app
+
+# Copy package manifests
+COPY package.json package-lock.json* ./
+COPY prisma/schema.prisma ./prisma/schema.prisma
+
+# Install ALL dependencies (including devDeps for ts-node-dev)
+RUN npm ci --frozen-lockfile
+
+# Generate Prisma client
+RUN npx prisma generate
+
+# Copy the rest of the source (src/ will be overridden by docker-compose volume)
+COPY . .
+
+EXPOSE 3000
+
+# ts-node-dev restarts on file changes; --respawn keeps it alive after crashes
+CMD ["npm", "run", "dev"]

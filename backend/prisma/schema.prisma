@@ -1,0 +1,694 @@
+// =============================================================================
+// Prisma Schema — P2P Learning App
+// Production-grade schema with full relations, indexes, and soft-delete support.
+// =============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ENUMS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Age-based tier that separates school students from college/university students.
+enum AgeTier {
+  SCHOOL
+  COLLEGE
+}
+
+/// Lifecycle state of a user account.
+enum AccountStatus {
+  ACTIVE
+  SUSPENDED
+  PENDING_VERIFICATION
+  BLOCKED
+}
+
+/// Authentication provider for a user account.
+enum OAuthProvider {
+  LOCAL
+  GOOGLE
+  APPLE
+}
+
+/// Role a user can hold within the platform.
+enum UserRoleType {
+  LEARNER
+  TUTOR
+  MENTOR
+}
+
+/// KYC verification status for tutor identity checks.
+enum KycStatus {
+  NOT_STARTED
+  PENDING
+  VERIFIED
+  REJECTED
+}
+
+/// Publication lifecycle of a course.
+enum PublishStatus {
+  DRAFT
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+  PUBLISHED
+  ARCHIVED
+}
+
+/// Content types subject to mentor review.
+enum ContentType {
+  COURSE
+  SESSION
+}
+
+/// Review decision by a mentor.
+enum ReviewStatus {
+  PENDING_REVIEW
+  APPROVED
+  REJECTED
+}
+
+/// Whether a live session is one-on-one or open to a group.
+enum SessionType {
+  ONE_ON_ONE
+  GROUP
+}
+
+/// Lifecycle state of a live session.
+enum SessionStatus {
+  SCHEDULED
+  LIVE
+  COMPLETED
+  CANCELLED
+  NO_SHOW
+}
+
+/// State of a session booking made by a learner.
+enum BookingStatus {
+  PENDING
+  CONFIRMED
+  CANCELLED
+  COMPLETED
+  REFUNDED
+}
+
+/// Conversation type — session support or general direct messaging.
+enum ConversationType {
+  SESSION_SUPPORT
+  DIRECT
+}
+
+/// Media type of a chat message.
+enum MessageType {
+  TEXT
+  FILE
+  IMAGE
+}
+
+/// Category of a payment transaction.
+enum PaymentType {
+  COURSE_PURCHASE
+  SESSION_BOOKING
+  CHAT_SESSION
+  PAYOUT
+}
+
+/// Lifecycle state of a payment.
+enum PaymentStatus {
+  PENDING
+  PROCESSING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  CANCELLED
+}
+
+/// State of a tutor's earning record.
+enum EarningStatus {
+  PENDING
+  AVAILABLE
+  PAID_OUT
+}
+
+/// State of a payout to a tutor's bank account.
+enum PayoutStatus {
+  PENDING
+  PROCESSING
+  PAID
+  FAILED
+}
+
+/// Notification event types.
+enum NotificationType {
+  BOOKING_CONFIRMED
+  SESSION_REMINDER
+  REVIEW_APPROVED
+  REVIEW_REJECTED
+  PAYOUT_PROCESSED
+  NEW_MESSAGE
+  SYSTEM
+}
+
+/// Stripe Connect account linkage status.
+enum StripeAccountStatus {
+  NOT_CONNECTED
+  PENDING
+  ACTIVE
+  RESTRICTED
+  DEAUTHORIZED
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// MODELS
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Core user account. Supports local auth (password) and OAuth (Google/Apple).
+/// Uses soft-delete via deletedAt so foreign-key data is preserved.
+model User {
+  id String @id @default(uuid())
+
+  /// Primary contact and login identifier — must be globally unique.
+  email         String  @unique
+  /// Bcrypt hash; null for OAuth-only users.
+  passwordHash  String?
+  emailVerified Boolean @default(false)
+
+  /// One-time token sent to the user's email for verification.
+  emailVerificationToken String?
+  /// One-time token for password reset flows.
+  passwordResetToken     String?
+  /// Expiry timestamp for the password reset token.
+  passwordResetExpiry    DateTime?
+
+  /// Determines which content pool the user can access.
+  ageTier       AgeTier       @default(SCHOOL)
+  accountStatus AccountStatus @default(PENDING_VERIFICATION)
+  oauthProvider OAuthProvider @default(LOCAL)
+  /// Provider-specific user ID (e.g. Google sub, Apple user identifier).
+  oauthId       String?
+
+  /// Profile information
+  firstName     String?
+  lastName      String?
+  avatarUrl     String?
+  bio           String?       @db.Text
+
+  /// Stripe Customer ID for processing payments.
+  stripeCustomerId String?
+
+  createdAt DateTime  @default(now())
+  updatedAt DateTime  @updatedAt
+  /// Soft-delete timestamp — null means the account is active.
+  deletedAt DateTime?
+
+  // ── Relations ──
+  refreshTokens    RefreshToken[]
+  roles            UserRole[]
+  tutorProfile     TutorProfile?
+  mentorProfile    MentorProfile?
+  payments         Payment[]
+  notifications    Notification[]
+  auditLogs        AuditLog[]        @relation("AuditActor")
+  chatParticipants ChatParticipant[]
+  chatMessages     ChatMessage[]
+  sessionBookings  SessionBooking[]
+
+  @@index([email])
+  @@index([oauthProvider, oauthId])
+  @@index([accountStatus])
+  @@index([deletedAt])
+  @@map("users")
+}
+
+/// JWT refresh tokens with rotation support and device tracking.
+model RefreshToken {
+  id String @id @default(uuid())
+
+  /// The raw refresh token string (store hashed in production if preferred).
+  token     String   @unique
+  userId    String
+  expiresAt DateTime
+  isRevoked Boolean  @default(false)
+  createdAt DateTime @default(now())
+
+  /// IP address at the time of token issuance (for anomaly detection).
+  ipAddress String?
+  /// User-agent string at the time of issuance.
+  userAgent String?
+
+  // ── Relations ──
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Maps users to platform roles. A user can hold multiple roles.
+model UserRole {
+  id       String      @id @default(uuid())
+  userId   String
+  role     UserRoleType
+  isActive Boolean     @default(true)
+  createdAt DateTime   @default(now())
+
+  // ── Relations ──
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, role])
+  @@index([userId])
+  @@index([role])
+  @@map("user_roles")
+}
+
+/// Extended profile for users who teach on the platform.
+model TutorProfile {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  bio             String    @db.Text
+  subjects        String[]
+  /// Hourly rate in the specified currency.
+  hourlyRate      Decimal   @db.Decimal(10, 2)
+  currency        String    @default("GBP")
+  yearsExperience Int       @default(0)
+  educationLevel  String
+  university      String?
+
+  /// JSON object defining weekly availability blocks.
+  /// Example: { "monday": [{ "start": "09:00", "end": "17:00" }] }
+  availability Json @default("{}")
+
+  /// Whether a mentor has approved this tutor to teach on the platform.
+  isVerifiedByMentor Boolean @default(false)
+
+  /// Stripe Connect Express account ID for receiving payouts.
+  stripeAccountId     String?
+  stripeAccountStatus StripeAccountStatus @default(NOT_CONNECTED)
+  kycStatus           KycStatus           @default(NOT_STARTED)
+
+  /// Aggregated statistics (denormalised for query performance).
+  totalSessions Int     @default(0)
+  totalEarnings Decimal @default(0) @db.Decimal(12, 2)
+  avgRating     Decimal @default(0) @db.Decimal(3, 2)
+  reviewCount   Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  user          User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  courses       Course[]
+  liveSessions  LiveSession[]
+  earnings      TutorEarning[]
+  payouts       Payout[]
+
+  @@index([userId])
+  @@index([kycStatus])
+  @@index([isVerifiedByMentor])
+  @@map("tutor_profiles")
+}
+
+/// Extended profile for verified mentors who oversee tutors and review content.
+model MentorProfile {
+  id     String @id @default(uuid())
+  userId String @unique
+
+  degreeName             String
+  university             String
+  /// URL to the degree certificate uploaded to cloud storage.
+  degreeVerificationUrl  String
+  /// Whether platform admins have approved this mentor.
+  isVerified             Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  user           User            @relation(fields: [userId], references: [id], onDelete: Cascade)
+  contentReviews ContentReview[]
+
+  @@index([userId])
+  @@index([isVerified])
+  @@map("mentor_profiles")
+}
+
+/// A structured course created by a tutor, reviewed by a mentor before publishing.
+model Course {
+  id      String @id @default(uuid())
+  tutorId String
+
+  title         String
+  description   String       @db.Text
+  subject       String
+  ageTierFilter AgeTier
+  thumbnailUrl  String?
+  price         Decimal      @db.Decimal(10, 2)
+  currency      String       @default("GBP")
+  publishStatus PublishStatus @default(DRAFT)
+  lessonCount   Int          @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  tutor         TutorProfile    @relation(fields: [tutorId], references: [id], onDelete: Restrict)
+  lessons       Lesson[]
+  contentReview ContentReview[]
+
+  @@index([tutorId])
+  @@index([ageTierFilter])
+  @@index([publishStatus])
+  @@index([subject])
+  @@map("courses")
+}
+
+/// An individual lesson within a course.
+model Lesson {
+  id       String @id @default(uuid())
+  courseId String
+
+  title     String
+  content   String  @db.Text
+  videoUrl  String?
+  /// Video or audio duration in seconds.
+  duration  Int     @default(0)
+  /// Zero-based display order within the course.
+  sortOrder Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  course Course @relation(fields: [courseId], references: [id], onDelete: Cascade)
+
+  @@index([courseId])
+  @@index([courseId, sortOrder])
+  @@map("lessons")
+}
+
+/// Mentor review record for a course or session before it goes live.
+model ContentReview {
+  id          String      @id @default(uuid())
+  /// ID of the content being reviewed (Course.id or LiveSession.id).
+  contentId   String
+  contentType ContentType
+  mentorId    String?
+
+  status     ReviewStatus @default(PENDING_REVIEW)
+  /// Feedback text returned to the tutor on rejection.
+  feedback   String?      @db.Text
+  reviewedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  mentor       MentorProfile? @relation(fields: [mentorId], references: [id], onDelete: Restrict)
+  course       Course?       @relation(fields: [contentId], references: [id], onDelete: Cascade, map: "content_review_course_fk")
+  liveSession  LiveSession?  @relation(fields: [contentId], references: [id], onDelete: Cascade, map: "content_review_session_fk")
+
+  @@index([contentId, contentType])
+  @@index([mentorId])
+  @@index([status])
+  @@map("content_reviews")
+}
+
+/// A real-time live teaching session created by a tutor.
+model LiveSession {
+  id      String @id @default(uuid())
+  tutorId String
+
+  title           String
+  description     String      @db.Text
+  sessionType     SessionType
+  ageTierFilter   AgeTier
+  subject         String
+  /// Maximum allowed attendees; null means unlimited (for one-on-one, set to 1).
+  maxParticipants Int?
+  price           Decimal     @db.Decimal(10, 2)
+  currency        String      @default("GBP")
+  scheduledAt     DateTime
+  durationMinutes Int
+
+  status          SessionStatus @default(SCHEDULED)
+  /// Video room identifier from the video provider (e.g. Daily.co room name).
+  videoRoomId     String?
+  /// Pre-generated moderator/host token for the video room.
+  videoRoomToken  String?
+
+  contentReviewId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  tutor          TutorProfile    @relation(fields: [tutorId], references: [id], onDelete: Restrict)
+  bookings       SessionBooking[]
+  contentReviews ContentReview[]
+
+  @@index([tutorId])
+  @@index([scheduledAt])
+  @@index([status])
+  @@index([ageTierFilter])
+  @@map("live_sessions")
+}
+
+/// A learner's booking for a live session.
+model SessionBooking {
+  id        String @id @default(uuid())
+  sessionId String
+  learnerId String
+
+  status    BookingStatus @default(PENDING)
+  paymentId String?
+
+  /// Timestamp when the learner joined the video room.
+  joinedAt DateTime?
+  /// Timestamp when the learner left the video room.
+  leftAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  session LiveSession @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  learner User        @relation(fields: [learnerId], references: [id], onDelete: Restrict)
+
+  @@unique([sessionId, learnerId])
+  @@index([sessionId])
+  @@index([learnerId])
+  @@index([status])
+  @@map("session_bookings")
+}
+
+/// A messaging thread, either linked to a session or standalone direct message.
+model ChatConversation {
+  id   String           @id @default(uuid())
+  type ConversationType
+
+  /// True once all participants' age tiers have been validated.
+  ageTierValidated Boolean @default(false)
+  /// Optional link to the live session this conversation belongs to.
+  sessionId        String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  participants ChatParticipant[]
+  messages     ChatMessage[]
+
+  @@index([type])
+  @@index([sessionId])
+  @@map("chat_conversations")
+}
+
+/// Junction between a user and a conversation (supports read receipts).
+model ChatParticipant {
+  id             String @id @default(uuid())
+  conversationId String
+  userId         String
+
+  joinedAt   DateTime  @default(now())
+  /// Timestamp of the last message the user has read.
+  lastReadAt DateTime?
+
+  // ── Relations ──
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  user         User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([conversationId, userId])
+  @@index([conversationId])
+  @@index([userId])
+  @@map("chat_participants")
+}
+
+/// An individual message within a conversation.
+model ChatMessage {
+  id             String @id @default(uuid())
+  conversationId String
+  senderId       String
+
+  content     String      @db.Text
+  messageType MessageType @default(TEXT)
+  /// URL to the uploaded file or image in cloud storage.
+  fileUrl     String?
+  /// Soft-delete — content is hidden but record preserved for audit.
+  isDeleted   Boolean     @default(false)
+
+  createdAt DateTime @default(now())
+
+  // ── Relations ──
+  conversation ChatConversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+  sender       User             @relation(fields: [senderId], references: [id], onDelete: Restrict)
+
+  @@index([conversationId])
+  @@index([senderId])
+  @@index([conversationId, createdAt])
+  @@map("chat_messages")
+}
+
+/// Stripe payment record for any monetary transaction on the platform.
+model Payment {
+  id     String @id @default(uuid())
+  userId String
+
+  amount   Decimal     @db.Decimal(10, 2)
+  currency String      @default("GBP")
+  type     PaymentType
+  status   PaymentStatus @default(PENDING)
+
+  stripePaymentIntentId String?
+  stripeTransferId      String?
+  /// Arbitrary metadata (e.g. course ID, session ID) stored as JSON.
+  metadata              Json?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  // ── Relations ──
+  user     User           @relation(fields: [userId], references: [id], onDelete: Restrict)
+  earnings TutorEarning[]
+
+  @@index([userId])
+  @@index([status])
+  @@index([type])
+  @@index([stripePaymentIntentId])
+  @@map("payments")
+}
+
+/// Breakdown of a tutor's earnings for each payment, after platform fee.
+model TutorEarning {
+  id       String @id @default(uuid())
+  tutorId  String
+  paymentId String
+
+  grossAmount Decimal       @db.Decimal(10, 2)
+  platformFee Decimal       @db.Decimal(10, 2)
+  netAmount   Decimal       @db.Decimal(10, 2)
+  currency    String        @default("GBP")
+  status      EarningStatus @default(PENDING)
+
+  /// When the earning was included in a payout.
+  paidOutAt        DateTime?
+  stripeTransferId String?
+
+  createdAt DateTime @default(now())
+
+  // ── Relations ──
+  tutor   TutorProfile @relation(fields: [tutorId], references: [id], onDelete: Restrict)
+  payment Payment      @relation(fields: [paymentId], references: [id], onDelete: Restrict)
+
+  @@index([tutorId])
+  @@index([paymentId])
+  @@index([status])
+  @@map("tutor_earnings")
+}
+
+/// A payout batch transferred from platform escrow to a tutor's bank account.
+model Payout {
+  id      String @id @default(uuid())
+  tutorId String
+
+  amount   Decimal      @db.Decimal(10, 2)
+  currency String       @default("GBP")
+  status   PayoutStatus @default(PENDING)
+
+  stripePayoutId  String?
+  failureReason   String?
+  initiatedAt     DateTime  @default(now())
+  completedAt     DateTime?
+
+  createdAt DateTime @default(now())
+
+  // ── Relations ──
+  tutor TutorProfile @relation(fields: [tutorId], references: [id], onDelete: Restrict)
+
+  @@index([tutorId])
+  @@index([status])
+  @@map("payouts")
+}
+
+/// In-app notification delivered to a specific user.
+model Notification {
+  id     String @id @default(uuid())
+  userId String
+
+  type   NotificationType
+  title  String
+  body   String           @db.Text
+  /// Arbitrary payload (e.g. deep-link target) stored as JSON.
+  data   Json?
+  isRead Boolean          @default(false)
+
+  createdAt DateTime @default(now())
+
+  // ── Relations ──
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([userId, isRead])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+/// Immutable audit trail for all significant platform actions.
+model AuditLog {
+  id      String  @id @default(uuid())
+  /// Null if the action was performed by the system/scheduler.
+  actorId String?
+
+  /// Verb describing the action performed (e.g. "user.login", "course.published").
+  action     String
+  /// Entity type being acted upon (e.g. "User", "Course").
+  resource   String
+  /// Primary key of the entity being acted upon.
+  resourceId String?
+  /// Extra context (e.g. changed fields, request body diff).
+  metadata   Json?
+
+  ipAddress String?
+  userAgent String?
+  /// Whether the action completed successfully.
+  success   Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  // ── Relations ──
+  actor User? @relation("AuditActor", fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([actorId])
+  @@index([resource, resourceId])
+  @@index([action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
